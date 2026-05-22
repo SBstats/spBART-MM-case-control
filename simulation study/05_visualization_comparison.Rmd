@@ -1,0 +1,437 @@
+---
+title: "Simulation Study: Tables for Writeup Draft 5"
+subtitle: "Section 7 main tables + Appendix C parametric comparison"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+# Overview
+
+This Rmd produces the simulation tables that appear in `Writeup Draft 5.tex`. It is intentionally lean: no exploratory plots, no narrative, no supplementary artifacts.
+
+- **Section A — Section 7 main tables**
+  - Table 7.1: Variable selection (sensitivity, FDR, # selected) for DGM 1 & 2, BART vs spBART
+  - Table 7.2: Prediction (AUC, Brier, RMSE) for DGM 1 & 2, BART vs spBART
+  - Table 7.3: Covariate selection % for **standard BART under DGM 2 only**
+  - Table 7.4: β estimation (bias, RMSE, P(correct sign)) for **spBART under DGM 2**
+- **Section B — Appendix C**
+  - β estimation comparison across spBART, probit regression, and logistic regression under DGM 2
+  - Logistic-regression convergence diagnostics
+
+---
+
+# Load Results
+
+```{r load-results}
+results_dir <- file.path(getwd(), "results")
+
+load_results <- function(true_model, method, sample_sizes = c(1500, 2500),
+                         gene_counts = c(500, 2000, 3000)) {
+
+  results_list <- list()
+
+  for (n in sample_sizes) {
+    for (p in gene_counts) {
+      model_dir  <- paste0("TrueModel", true_model)
+      method_dir <- file.path(results_dir, model_dir, paste0("n", n), paste0("p", p), method)
+
+      if (!dir.exists(method_dir)) next
+
+      rds_files <- list.files(method_dir, pattern = "\\.RDS$", full.names = TRUE)
+      for (f in rds_files) {
+        res <- tryCatch(readRDS(f), error = function(e) NULL)
+        if (!is.null(res)) results_list[[length(results_list) + 1]] <- res
+      }
+    }
+  }
+
+  return(results_list)
+}
+
+tm1_regular  <- load_results(1, "regular_BART")
+tm1_spbart   <- load_results(1, "spBART")
+tm2_regular  <- load_results(2, "regular_BART")
+tm2_spbart   <- load_results(2, "spBART")
+tm2_logistic <- load_results(2, "logistic_reg")
+tm2_probit   <- load_results(2, "probit_reg")
+
+cat("Loaded results:\n")
+cat("  DGM 1, Regular BART:", length(tm1_regular), "replicates\n")
+cat("  DGM 1, spBART:      ", length(tm1_spbart),  "replicates\n")
+cat("  DGM 2, Regular BART:", length(tm2_regular), "replicates\n")
+cat("  DGM 2, spBART:      ", length(tm2_spbart),  "replicates\n")
+cat("  DGM 2, Logistic Reg:", length(tm2_logistic), "replicates\n")
+cat("  DGM 2, Probit Reg:  ", length(tm2_probit),   "replicates\n")
+```
+
+```{r compile-results}
+compile_results <- function(results_list, true_model, method) {
+  if (length(results_list) == 0) return(NULL)
+
+  map_dfr(results_list, function(res) {
+    tibble(
+      true_model  = true_model,
+      method      = method,
+      sample_size = res$sample_size,
+      p_genes     = res$p_genes,
+      replicate   = res$replicate_id,
+
+      sensitivity = res$sensitivity,
+      FDR         = res$FDR_actual,
+      n_selected  = res$n_union_genes,
+
+      final_AUC   = if (!is.null(res$final_AUC))   res$final_AUC   else NA,
+      final_Brier = if (!is.null(res$final_Brier)) res$final_Brier else NA,
+      final_RMSE  = if (!is.null(res$final_RMSE))  res$final_RMSE  else NA
+    )
+  })
+}
+
+# Covariate selection compiled only for DGM 2 (Table 7.3) — DGM 1 output no
+# longer carries union_covariates after the simulation-side cleanup.
+compile_covariate_selection <- function(results_list, true_model, method) {
+  if (length(results_list) == 0) return(NULL)
+
+  map_dfr(results_list, function(res) {
+    if (is.null(res$union_covariates)) return(NULL)
+
+    all_covariates <- c("age", "sex", "race", "BMI")
+    tibble(
+      true_model  = true_model,
+      method      = method,
+      sample_size = res$sample_size,
+      p_genes     = res$p_genes,
+      replicate   = res$replicate_id,
+      covariate   = all_covariates,
+      selected    = all_covariates %in% res$union_covariates
+    )
+  })
+}
+
+all_results <- bind_rows(
+  compile_results(tm1_regular, 1, "Regular BART"),
+  compile_results(tm1_spbart,  1, "spBART"),
+  compile_results(tm2_regular, 2, "Regular BART"),
+  compile_results(tm2_spbart,  2, "spBART")
+)
+
+# Table 7.3 input: DGM 2 + Regular BART only.
+covariate_selection_results <- compile_covariate_selection(tm2_regular, 2, "Regular BART")
+```
+
+---
+
+# Section A — Section 7 Main Tables
+
+## Table 7.1 — Variable Selection
+
+```{r table-7-1}
+if (nrow(all_results) > 0) {
+  table_7_1 <- all_results %>%
+    group_by(true_model, method, sample_size, p_genes) %>%
+    summarize(
+      n_reps     = n(),
+      sens_mean  = mean(sensitivity, na.rm = TRUE),
+      sens_sd    = sd(sensitivity,   na.rm = TRUE),
+      fdr_mean   = mean(FDR,         na.rm = TRUE),
+      fdr_sd     = sd(FDR,           na.rm = TRUE),
+      n_sel_mean = mean(n_selected,  na.rm = TRUE),
+      n_sel_sd   = sd(n_selected,    na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Sensitivity      = sprintf("%.3f (%.3f)", sens_mean,  sens_sd),
+      FDR              = sprintf("%.3f (%.3f)", fdr_mean,   fdr_sd),
+      `Genes Selected` = sprintf("%.1f (%.1f)", n_sel_mean, n_sel_sd)
+    )
+
+  table_7_1 %>%
+    select(true_model, method, sample_size, p_genes, n_reps, Sensitivity, FDR, `Genes Selected`) %>%
+    kable(caption = "Table 7.1 — Variable selection performance: mean (SD) across replications.",
+          col.names = c("DGM", "Method", "n", "p", "Reps", "Sensitivity", "FDR", "Selected")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    collapse_rows(columns = 1:2)
+}
+```
+
+## Table 7.2 — Prediction Performance
+
+```{r table-7-2}
+if (nrow(all_results) > 0) {
+  table_7_2 <- all_results %>%
+    filter(!is.na(final_AUC)) %>%
+    group_by(true_model, method, sample_size, p_genes) %>%
+    summarize(
+      n_reps     = n(),
+      auc_mean   = mean(final_AUC,   na.rm = TRUE),
+      auc_sd     = sd(final_AUC,     na.rm = TRUE),
+      brier_mean = mean(final_Brier, na.rm = TRUE),
+      brier_sd   = sd(final_Brier,   na.rm = TRUE),
+      rmse_mean  = mean(final_RMSE,  na.rm = TRUE),
+      rmse_sd    = sd(final_RMSE,    na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      AUC           = sprintf("%.3f (%.3f)", auc_mean,   auc_sd),
+      `Brier Score` = sprintf("%.4f (%.4f)", brier_mean, brier_sd),
+      RMSE          = sprintf("%.4f (%.4f)", rmse_mean,  rmse_sd)
+    )
+
+  table_7_2 %>%
+    select(true_model, method, sample_size, p_genes, n_reps, AUC, `Brier Score`, RMSE) %>%
+    kable(caption = "Table 7.2 — Prediction performance: mean (SD) from final model on union genes.",
+          col.names = c("DGM", "Method", "n", "p", "Reps", "AUC", "Brier", "RMSE")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    collapse_rows(columns = 1:2)
+}
+```
+
+## Table 7.3 — Covariate Selection (Standard BART, DGM 2 only)
+
+```{r table-7-3}
+if (!is.null(covariate_selection_results) && nrow(covariate_selection_results) > 0) {
+  table_7_3 <- covariate_selection_results %>%
+    group_by(sample_size, p_genes, covariate) %>%
+    summarize(
+      n_replicates         = n(),
+      n_selected           = sum(selected),
+      selection_proportion = mean(selected),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      `Selection %` = sprintf("%.1f%%", 100 * selection_proportion),
+      `Selected`    = sprintf("%d/%d",  n_selected, n_replicates)
+    )
+
+  table_7_3 %>%
+    select(sample_size, p_genes, covariate, `Selected`, `Selection %`) %>%
+    kable(caption = "Table 7.3 — Covariate selection % for standard BART under DGM 2 (4 covariates).",
+          col.names = c("n", "p", "Covariate", "Selected", "Selection %")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    collapse_rows(columns = 1:2)
+} else {
+  cat("No DGM 2 covariate selection results available.\n")
+}
+```
+
+## Table 7.4 — β Estimation (spBART, DGM 2)
+
+```{r table-7-4}
+compile_beta_results <- function(results_list, true_model) {
+  if (length(results_list) == 0) return(NULL)
+
+  map_dfr(results_list, function(res) {
+    if (is.null(res$beta_hat)) return(NULL)
+
+    tibble(
+      true_model    = true_model,
+      sample_size   = res$sample_size,
+      p_genes       = res$p_genes,
+      replicate     = res$replicate_id,
+      covariate     = names(res$beta_hat),
+      beta_true     = res$beta_true,
+      beta_hat      = res$beta_hat,
+      beta_sd       = res$beta_sd,
+      beta_ci_lower = res$beta_ci_lower,
+      beta_ci_upper = res$beta_ci_upper,
+      coverage      = res$beta_coverage,
+      sign_prob     = if (!is.null(res$beta_sign_prob)) res$beta_sign_prob else NA
+    )
+  })
+}
+
+beta_results_spbart <- compile_beta_results(tm2_spbart, 2)
+
+if (!is.null(beta_results_spbart) && nrow(beta_results_spbart) > 0) {
+
+  table_7_4 <- beta_results_spbart %>%
+    group_by(sample_size, p_genes, covariate) %>%
+    summarize(
+      n_reps       = n(),
+      beta_true    = first(beta_true),
+      bias         = mean(beta_hat - beta_true,            na.rm = TRUE),
+      rmse         = sqrt(mean((beta_hat - beta_true)^2,   na.rm = TRUE)),
+      coverage     = mean(coverage,                        na.rm = TRUE),
+      avg_ci_width = mean(beta_ci_upper - beta_ci_lower,   na.rm = TRUE),
+      sign_prob    = mean(sign_prob,                       na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  table_7_4 %>%
+    mutate(
+      Bias              = sprintf("%.3f", bias),
+      RMSE              = sprintf("%.3f", rmse),
+      Coverage          = sprintf("%.1f%%", 100 * coverage),
+      `CI Width`        = sprintf("%.3f", avg_ci_width),
+      `P(Correct Sign)` = sprintf("%.1f%%", 100 * sign_prob)
+    ) %>%
+    select(sample_size, p_genes, covariate, beta_true, Bias, RMSE, Coverage, `CI Width`, `P(Correct Sign)`) %>%
+    kable(caption = "Table 7.4 — β estimation performance for spBART under DGM 2.",
+          col.names = c("n", "p", "Covariate", "True β", "Bias", "RMSE", "95% CI Cov.", "Avg CI Width", "P(Correct Sign)")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+}
+```
+
+---
+
+# Section B — Appendix C: Parametric Comparison
+
+This section reproduces the appendix table that compares β estimation across spBART, probit regression, and logistic regression under DGM 2. Probit and logistic results come from `06_TrueModel2_logistic_regression.R`.
+
+## Logistic-regression convergence diagnostics
+
+```{r appendix-c-convergence}
+compile_parametric_beta_results <- function(results_list, true_model, method) {
+  if (length(results_list) == 0) return(NULL)
+
+  map_dfr(results_list, function(res) {
+    if (is.null(res$beta_hat)) return(NULL)
+
+    sep <- if (!is.null(res$separation_detected)) res$separation_detected else FALSE
+
+    tibble(
+      true_model        = true_model,
+      method            = method,
+      sample_size       = res$sample_size,
+      p_genes           = res$p_genes,
+      replicate         = res$replicate_id,
+      covariate         = names(res$beta_hat),
+      beta_true         = res$beta_true,
+      beta_hat          = res$beta_hat,
+      beta_bias         = res$beta_bias,
+      beta_rmse         = res$beta_rmse,
+      beta_sign_correct = res$beta_sign_correct,
+      converged         = res$converged,
+      separation        = sep
+    )
+  })
+}
+
+beta_results_logistic <- compile_parametric_beta_results(tm2_logistic, 2, "Logistic Regression")
+beta_results_probit   <- compile_parametric_beta_results(tm2_probit,   2, "Probit Regression")
+
+if (!is.null(beta_results_logistic) && nrow(beta_results_logistic) > 0) {
+  beta_results_logistic %>%
+    group_by(sample_size, p_genes) %>%
+    summarize(
+      n_replicates     = n() / 4,            # 4 covariates per replicate
+      n_converged      = sum(converged) / 4,
+      convergence_rate = mean(converged),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      `Converged` = sprintf("%d/%d", n_converged, n_replicates),
+      `Rate`      = sprintf("%.1f%%", 100 * convergence_rate)
+    ) %>%
+    select(sample_size, p_genes, `Converged`, `Rate`) %>%
+    kable(caption = "Logistic regression convergence rates by (n, p).",
+          col.names = c("n", "p", "Converged", "Rate")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+}
+```
+
+## Appendix C Table — β Estimation Comparison (spBART vs Probit Reg vs Logistic Reg)
+
+```{r appendix-c-beta-comparison}
+filter_converged <- function(beta_df) {
+  if (is.null(beta_df) || nrow(beta_df) == 0) return(NULL)
+  df <- beta_df %>% filter(converged == TRUE)
+  if (nrow(df) == 0) return(NULL)
+  return(df)
+}
+
+logistic_converged <- filter_converged(beta_results_logistic)
+probit_converged   <- filter_converged(beta_results_probit)
+
+if (!is.null(beta_results_spbart) && nrow(beta_results_spbart) > 0) {
+
+  combined_beta_results <- bind_rows(
+    beta_results_spbart %>%
+      mutate(method = "spBART") %>%
+      select(true_model, sample_size, p_genes, replicate, covariate,
+             beta_true, beta_hat, method),
+
+    if (!is.null(logistic_converged)) {
+      logistic_converged %>%
+        select(true_model, sample_size, p_genes, replicate, covariate,
+               beta_true, beta_hat, method)
+    } else NULL,
+
+    if (!is.null(probit_converged)) {
+      probit_converged %>%
+        select(true_model, sample_size, p_genes, replicate, covariate,
+               beta_true, beta_hat, method)
+    } else NULL
+  )
+
+  beta_comparison_summary <- combined_beta_results %>%
+    group_by(method, sample_size, p_genes, covariate) %>%
+    summarize(
+      n_reps    = n(),
+      beta_true = first(beta_true),
+      bias      = mean(beta_hat - beta_true, na.rm = TRUE),
+      rmse      = sqrt(mean((beta_hat - beta_true)^2, na.rm = TRUE)),
+      .groups = "drop"
+    )
+
+  fmt_val <- function(x) ifelse(is.na(x), "NA",
+                          ifelse(abs(x) >= 100, sprintf("%.3e", x), sprintf("%.3f", x)))
+
+  beta_wide <- beta_comparison_summary %>%
+    mutate(Bias = fmt_val(bias), RMSE = fmt_val(rmse)) %>%
+    select(method, sample_size, p_genes, covariate, beta_true, Bias, RMSE) %>%
+    pivot_wider(
+      names_from  = method,
+      values_from = c(Bias, RMSE),
+      names_glue  = "{method}_{.value}"
+    )
+
+  methods_present <- unique(beta_comparison_summary$method)
+
+  header_spec <- c(" " = 4)
+  for (m in methods_present) header_spec[m] <- 2
+
+  method_cols <- unlist(lapply(methods_present, function(m) {
+    paste0(m, "_", c("Bias", "RMSE"))
+  }))
+
+  beta_wide %>%
+    select(sample_size, p_genes, covariate, beta_true, all_of(method_cols)) %>%
+    kable(
+      caption   = "Appendix C — β estimation comparison under DGM 2.",
+      col.names = c("n", "p", "Covariate", "True β",
+                    rep(c("Bias", "RMSE"), length(methods_present))),
+      align     = c("l", "l", "l", "r", rep("r", 2 * length(methods_present)))
+    ) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+    add_header_above(header_spec) %>%
+    collapse_rows(columns = 1:2, valign = "middle")
+}
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

@@ -1,0 +1,474 @@
+---
+title: "Multiple Myeloma Pathway Analysis for spBART-Selected Risk Genes"
+author: "Saurabh Bhandari"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    code_folding: show
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = FALSE
+)
+```
+
+# Overview
+
+**Purpose:** Run functional enrichment analyses for the genes selected by spBART variable selection and persist the result objects to disk for reference.
+
+**Scope:** This Rmd performs computation only. Formal tables and figures live in `Writeup Draft 5.tex`; this document does not reproduce them.
+
+**Analyses performed:**
+
+1. Gene Ontology (BP, MF, CC) over-representation with BH correction.
+2. KEGG pathway over-representation.
+3. MSigDB C2:CGP enrichment against MM-related signatures (MYELOMA, PLASMA_CELL, BORTEZOMIB, etc.).
+4. MSigDB C7 enrichment against B-cell / plasma-cell immunologic signatures.
+5. Over-representation against a literature-curated panel of ten MM-critical pathways.
+6. Direct gene-pathway membership against the curated MM panel.
+
+All outputs are saved as CSV and RDS in `../gene_set_analysis_results/`.
+
+---
+
+# Setup and Libraries
+
+```{r install-and-load-packages, message=FALSE, warning=FALSE}
+install_if_missing_cran <- function(pkg) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    message(sprintf("Installing %s from CRAN...", pkg))
+    install.packages(pkg, dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+install_if_missing_bioc <- function(pkg) {
+  if (!require(pkg, character.only = TRUE, quietly = TRUE)) {
+    message(sprintf("Installing %s from Bioconductor...", pkg))
+    if (!require("BiocManager", quietly = TRUE)) {
+      install.packages("BiocManager")
+    }
+    BiocManager::install(pkg, update = FALSE, ask = FALSE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+cran_packages <- c("dplyr")
+for (pkg in cran_packages) install_if_missing_cran(pkg)
+
+bioc_packages <- c("clusterProfiler", "org.Hs.eg.db", "msigdbr",
+                   "AnnotationDbi", "DOSE")
+for (pkg in bioc_packages) install_if_missing_bioc(pkg)
+
+message("\n=== All packages loaded successfully ===")
+```
+
+---
+
+# Input: spBART-Selected Gene Set
+
+```{r define-gene-vectors}
+gene_vector_spBART <- c("IL1RAP", "ST5", "HERC6", "KL", "MYO1E", "ELK3", "CAPN2", "UBR4")
+message(sprintf("spBART gene set: %d genes", length(gene_vector_spBART)))
+```
+
+---
+
+# MM-Specific Gene Sets and Helper Functions
+
+```{r helper-functions}
+# ============================================================================
+# MM-SPECIFIC GENE SETS FROM MSigDB
+# ============================================================================
+
+# MSigDB C2:CGP - Cancer Gene Perturbation signatures (includes MM studies)
+msigdb_cgp <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CGP") %>%
+  dplyr::select(gs_name, entrez_gene)
+
+mm_keywords <- c("MYELOMA", "PLASMA_CELL", "PLASMACYTOMA", "BORTEZOMIB",
+                 "DEXAMETHASONE", "THALIDOMIDE", "LENALIDOMIDE", "VELCADE")
+msigdb_mm_specific <- msigdb_cgp %>%
+  filter(grepl(paste(mm_keywords, collapse = "|"), gs_name, ignore.case = TRUE))
+
+# MSigDB C7 - Immunologic signatures (B-cell / plasma cell)
+msigdb_immunologic <- msigdbr(species = "Homo sapiens", category = "C7", subcategory = "IMMUNESIGDB") %>%
+  dplyr::select(gs_name, entrez_gene)
+
+bcell_keywords <- c("BCELL", "B_CELL", "PLASMA", "MEMORY_B", "NAIVE_B", "ACTIVATED_B")
+msigdb_bcell <- msigdb_immunologic %>%
+  filter(grepl(paste(bcell_keywords, collapse = "|"), gs_name, ignore.case = TRUE))
+
+message(sprintf("Loaded %d MM-specific gene sets from MSigDB C2:CGP",
+                length(unique(msigdb_mm_specific$gs_name))))
+message(sprintf("Loaded %d B-cell/plasma cell gene sets from MSigDB C7",
+                length(unique(msigdb_bcell$gs_name))))
+
+# ============================================================================
+# CURATED MM PATHWAY GENE SETS (Literature-based)
+# ============================================================================
+
+symbol_to_entrez <- function(symbols) {
+  mapped <- bitr(symbols, fromType = "SYMBOL", toType = "ENTREZID",
+                 OrgDb = org.Hs.eg.db, drop = TRUE)
+  return(mapped$ENTREZID)
+}
+
+mm_pathways_list <- list(
+  "NFkB_Signaling" = c("NFKB1", "NFKB2", "RELA", "RELB", "REL", "NFKBIA", "NFKBIB",
+                       "IKBKB", "IKBKG", "CHUK", "TRAF2", "TRAF3", "TRAF6", "NIK",
+                       "MAP3K14", "BCL3", "CARD11", "MALT1", "BCL10"),
+  "IL6_JAK_STAT" = c("IL6", "IL6R", "IL6ST", "JAK1", "JAK2", "JAK3", "TYK2",
+                     "STAT1", "STAT3", "STAT5A", "STAT5B", "SOCS1", "SOCS3",
+                     "PIAS1", "PIAS3", "SHP2", "PTPN11", "GP130"),
+  "PI3K_AKT_mTOR" = c("PIK3CA", "PIK3CB", "PIK3CD", "PIK3CG", "PIK3R1", "PIK3R2",
+                      "AKT1", "AKT2", "AKT3", "MTOR", "RPTOR", "RICTOR", "MLST8",
+                      "PTEN", "PDK1", "PDPK1", "TSC1", "TSC2", "RHEB", "S6K1",
+                      "RPS6KB1", "4EBP1", "EIF4EBP1"),
+  "Cell_Cycle_MM" = c("CCND1", "CCND2", "CCND3", "CDK4", "CDK6", "RB1", "E2F1",
+                      "E2F2", "E2F3", "CDKN1A", "CDKN1B", "CDKN2A", "CDKN2C",
+                      "TP53", "MDM2", "MYC", "MYCN"),
+  "Apoptosis_Survival" = c("BCL2", "BCL2L1", "BCL2L2", "MCL1", "BAX", "BAK1",
+                           "BID", "BIM", "BCL2L11", "PUMA", "BBC3", "NOXA",
+                           "PMAIP1", "XIAP", "BIRC5", "SURVIVIN"),
+  "Bone_Remodeling" = c("TNFSF11", "RANKL", "TNFRSF11A", "RANK", "TNFRSF11B",
+                        "OPG", "DKK1", "SOST", "WNT3A", "WNT5A", "LRP5", "LRP6",
+                        "CTNNB1", "MIP1A", "CCL3", "IL3", "IL7", "HGF", "VEGFA"),
+  "Proteasome_UPS" = c("PSMA1", "PSMB1", "PSMB5", "PSMD1", "PSMD2", "PSMD4",
+                       "UBE2D1", "UBE2G1", "UBE2G2", "UBE2R1", "UBE3A", "UBE4B",
+                       "USP7", "USP14", "UCHL5", "VCP", "NPLOC4", "UFD1"),
+  "Plasma_Cell_Diff" = c("IRF4", "PRDM1", "BLIMP1", "XBP1", "PAX5", "BCL6",
+                         "CIITA", "CD19", "CD38", "CD138", "SDC1", "SLAMF7",
+                         "CS1", "BCMA", "TNFRSF17"),
+  "DNA_Damage_Response" = c("TP53", "ATM", "ATR", "CHEK1", "CHEK2", "BRCA1",
+                            "BRCA2", "RAD51", "PRKDC", "XRCC5", "XRCC6",
+                            "DDB1", "DDB2", "XPC", "ERCC1", "MLH1", "MSH2"),
+  "IL1_Signaling" = c("IL1A", "IL1B", "IL1R1", "IL1R2", "IL1RAP", "IL1RN",
+                      "MYD88", "IRAK1", "IRAK2", "IRAK4", "TRAF6", "TAB1",
+                      "TAB2", "TAK1", "MAP3K7", "NFKB1", "JNK", "MAPK8")
+)
+
+mm_pathways_t2g <- do.call(rbind, lapply(names(mm_pathways_list), function(pathway) {
+  entrez_ids <- tryCatch({
+    symbol_to_entrez(mm_pathways_list[[pathway]])
+  }, error = function(e) character(0))
+
+  if (length(entrez_ids) > 0) {
+    data.frame(gs_name = pathway, entrez_gene = entrez_ids, stringsAsFactors = FALSE)
+  } else {
+    NULL
+  }
+}))
+
+message(sprintf("Created %d curated MM pathway gene sets with %d total gene-pathway associations",
+                length(unique(mm_pathways_t2g$gs_name)), nrow(mm_pathways_t2g)))
+
+# ============================================================================
+# Compute overlap between a gene vector and the curated MM pathway list
+# ============================================================================
+summarize_mm_pathway_overlap <- function(gene_vector, analysis_name) {
+  message(sprintf("\n=== %s: MM Pathway Overlap Analysis ===", analysis_name))
+
+  overlap_summary <- lapply(names(mm_pathways_list), function(pathway) {
+    overlap <- intersect(gene_vector, mm_pathways_list[[pathway]])
+    data.frame(
+      Pathway = pathway,
+      N_Pathway_Genes = length(mm_pathways_list[[pathway]]),
+      N_Overlap = length(overlap),
+      Overlap_Pct = round(100 * length(overlap) / length(mm_pathways_list[[pathway]]), 1),
+      Genes = if (length(overlap) > 0) paste(overlap, collapse = ", ") else "-",
+      stringsAsFactors = FALSE
+    )
+  })
+
+  overlap_df <- do.call(rbind, overlap_summary)
+  overlap_df <- overlap_df[order(-overlap_df$N_Overlap), ]
+
+  pathways_with_overlap <- overlap_df$Pathway[overlap_df$N_Overlap > 0]
+  message(sprintf("  Pathways with gene overlap: %d/%d", length(pathways_with_overlap),
+                  length(mm_pathways_list)))
+  if (length(pathways_with_overlap) > 0) {
+    message(sprintf("  Pathways: %s", paste(pathways_with_overlap, collapse = ", ")))
+  }
+
+  return(overlap_df)
+}
+
+# ============================================================================
+# Per-gene MM pathway membership
+# ============================================================================
+create_gene_mm_summary <- function(gene_vector) {
+  gene_info <- lapply(gene_vector, function(gene) {
+    pathways_containing <- names(mm_pathways_list)[sapply(mm_pathways_list, function(p) gene %in% p)]
+    data.frame(
+      Gene = gene,
+      N_MM_Pathways = length(pathways_containing),
+      MM_Pathways = if (length(pathways_containing) > 0) {
+        paste(gsub("_", " ", pathways_containing), collapse = "; ")
+      } else {
+        "None (potentially novel)"
+      },
+      stringsAsFactors = FALSE
+    )
+  })
+
+  gene_df <- do.call(rbind, gene_info)
+  gene_df <- gene_df[order(-gene_df$N_MM_Pathways, gene_df$Gene), ]
+  return(gene_df)
+}
+
+# ============================================================================
+# Symbol -> Entrez for the spBART gene set
+# ============================================================================
+convert_genes_to_entrez <- function(gene_vector) {
+  message(sprintf("\n========== Converting genes for spBART =========="))
+  message(sprintf("Number of genes: %d", length(gene_vector)))
+
+  gene_entrez <- bitr(gene_vector, fromType = "SYMBOL",
+                      toType = c("ENTREZID", "ENSEMBL"), OrgDb = org.Hs.eg.db)
+  message(sprintf("Mapped %d/%d genes to Entrez IDs", nrow(gene_entrez), length(gene_vector)))
+  return(gene_entrez)
+}
+```
+
+---
+
+# Background Universe
+
+```{r define-background-universe}
+# Background = all human genes mappable to Entrez IDs via org.Hs.eg.db.
+# If you have the actual ~19,100 profiled gene list from the 5hmC assay, load it
+# here and convert to Entrez — that is the statistically correct background.
+all_genes_symbols <- keys(org.Hs.eg.db, keytype = "SYMBOL")
+
+background_entrez <- bitr(all_genes_symbols,
+                          fromType = "SYMBOL",
+                          toType = "ENTREZID",
+                          OrgDb = org.Hs.eg.db)
+
+message(sprintf("Background universe: %d genes with Entrez IDs", nrow(background_entrez)))
+```
+
+---
+
+# Gene ID Conversion
+
+```{r gene-conversion}
+gene_entrez_spbart <- convert_genes_to_entrez(gene_vector_spBART)
+
+output_dir <- "../gene_set_analysis_results"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+message(sprintf("Output directory: %s", normalizePath(output_dir)))
+```
+
+---
+
+# GO Enrichment (BP, MF, CC)
+
+```{r spbart-go-bp}
+go_bp_spbart <- enrichGO(gene = gene_entrez_spbart$ENTREZID,
+                         universe = background_entrez$ENTREZID,
+                         OrgDb = org.Hs.eg.db,
+                         ont = "BP",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = 0.1,
+                         qvalueCutoff = 0.2,
+                         readable = TRUE)
+```
+
+```{r spbart-go-mf}
+go_mf_spbart <- enrichGO(gene = gene_entrez_spbart$ENTREZID,
+                         universe = background_entrez$ENTREZID,
+                         OrgDb = org.Hs.eg.db,
+                         ont = "MF",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = 0.1,
+                         qvalueCutoff = 0.2,
+                         readable = TRUE)
+```
+
+```{r spbart-go-cc}
+go_cc_spbart <- enrichGO(gene = gene_entrez_spbart$ENTREZID,
+                         universe = background_entrez$ENTREZID,
+                         OrgDb = org.Hs.eg.db,
+                         ont = "CC",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = 0.1,
+                         qvalueCutoff = 0.2,
+                         readable = TRUE)
+```
+
+---
+
+# KEGG Enrichment
+
+```{r spbart-kegg}
+kegg_spbart <- enrichKEGG(gene = gene_entrez_spbart$ENTREZID,
+                          universe = background_entrez$ENTREZID,
+                          organism = "hsa",
+                          pAdjustMethod = "BH",
+                          pvalueCutoff = 0.1,
+                          qvalueCutoff = 0.2)
+
+if (!is.null(kegg_spbart) && nrow(kegg_spbart) > 0) {
+  kegg_spbart_readable <- setReadable(kegg_spbart, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+} else {
+  kegg_spbart_readable <- kegg_spbart
+}
+```
+
+---
+
+# MSigDB MM-Specific (C2:CGP) Enrichment
+
+```{r spbart-mm-specific}
+if (nrow(msigdb_mm_specific) > 0) {
+  mm_enrich_spbart <- enricher(gene = gene_entrez_spbart$ENTREZID,
+                               TERM2GENE = msigdb_mm_specific,
+                               pAdjustMethod = "BH",
+                               pvalueCutoff = 0.1,
+                               qvalueCutoff = 0.2)
+} else {
+  mm_enrich_spbart <- NULL
+}
+```
+
+---
+
+# MSigDB B-Cell / Plasma Cell (C7) Enrichment
+
+```{r spbart-bcell}
+if (nrow(msigdb_bcell) > 0) {
+  bcell_enrich_spbart <- enricher(gene = gene_entrez_spbart$ENTREZID,
+                                  TERM2GENE = msigdb_bcell,
+                                  pAdjustMethod = "BH",
+                                  pvalueCutoff = 0.1,
+                                  qvalueCutoff = 0.2)
+} else {
+  bcell_enrich_spbart <- NULL
+}
+```
+
+---
+
+# Curated MM Pathway Enrichment
+
+```{r spbart-mm-curated}
+mm_curated_spbart <- enricher(gene = gene_entrez_spbart$ENTREZID,
+                              TERM2GENE = mm_pathways_t2g,
+                              pAdjustMethod = "BH",
+                              pvalueCutoff = 0.2,
+                              qvalueCutoff = 0.5)
+
+if (!is.null(mm_curated_spbart) && nrow(mm_curated_spbart) > 0) {
+  mm_curated_spbart@result$Description <- gsub("_", " ", mm_curated_spbart@result$Description)
+}
+```
+
+---
+
+# Direct MM Pathway Membership
+
+```{r spbart-pathway-overlap}
+spbart_overlap <- summarize_mm_pathway_overlap(gene_vector_spBART, "spBART")
+spbart_gene_summary <- create_gene_mm_summary(gene_vector_spBART)
+
+spbart_in_pathways <- spbart_gene_summary[spbart_gene_summary$N_MM_Pathways > 0, ]
+spbart_novel <- spbart_gene_summary[spbart_gene_summary$N_MM_Pathways == 0, ]
+
+pathway_summary <- data.frame(
+  Pathway = names(mm_pathways_list),
+  N_Genes = sapply(mm_pathways_list, function(p) sum(gene_vector_spBART %in% p))
+)
+pathway_summary <- pathway_summary[order(-pathway_summary$N_Genes), ]
+pathway_summary$Pathway <- gsub("_", " ", pathway_summary$Pathway)
+```
+
+---
+
+# Save Results
+
+```{r save-results}
+# GO
+if (!is.null(go_bp_spbart) && nrow(go_bp_spbart) > 0) {
+  write.csv(as.data.frame(go_bp_spbart),
+            file.path(output_dir, "spbart_GO_BP.csv"), row.names = FALSE)
+}
+if (!is.null(go_mf_spbart) && nrow(go_mf_spbart) > 0) {
+  write.csv(as.data.frame(go_mf_spbart),
+            file.path(output_dir, "spbart_GO_MF.csv"), row.names = FALSE)
+}
+if (!is.null(go_cc_spbart) && nrow(go_cc_spbart) > 0) {
+  write.csv(as.data.frame(go_cc_spbart),
+            file.path(output_dir, "spbart_GO_CC.csv"), row.names = FALSE)
+}
+
+# KEGG
+if (!is.null(kegg_spbart) && nrow(kegg_spbart) > 0) {
+  write.csv(as.data.frame(kegg_spbart_readable),
+            file.path(output_dir, "spbart_KEGG.csv"), row.names = FALSE)
+}
+
+# MSigDB
+if (!is.null(mm_enrich_spbart) && nrow(mm_enrich_spbart) > 0) {
+  write.csv(as.data.frame(mm_enrich_spbart),
+            file.path(output_dir, "spbart_mm_specific_signatures.csv"), row.names = FALSE)
+}
+if (!is.null(bcell_enrich_spbart) && nrow(bcell_enrich_spbart) > 0) {
+  write.csv(as.data.frame(bcell_enrich_spbart),
+            file.path(output_dir, "spbart_bcell_signatures.csv"), row.names = FALSE)
+}
+
+# Curated MM pathway over-representation
+if (!is.null(mm_curated_spbart) && nrow(mm_curated_spbart) > 0) {
+  write.csv(as.data.frame(mm_curated_spbart),
+            file.path(output_dir, "spbart_mm_curated_enrichment.csv"), row.names = FALSE)
+}
+
+# Direct pathway membership
+write.csv(spbart_overlap,
+          file.path(output_dir, "spbart_mm_pathway_overlap.csv"), row.names = FALSE)
+write.csv(spbart_gene_summary,
+          file.path(output_dir, "spbart_gene_mm_summary.csv"), row.names = FALSE)
+write.csv(pathway_summary,
+          file.path(output_dir, "spbart_mm_pathway_summary.csv"), row.names = FALSE)
+write.csv(data.frame(Gene = gene_vector_spBART),
+          file.path(output_dir, "spbart_genes.csv"), row.names = FALSE)
+write.csv(spbart_novel,
+          file.path(output_dir, "spbart_novel_genes.csv"), row.names = FALSE)
+
+# Combined RDS
+all_results <- list(
+  gene_entrez_spbart = gene_entrez_spbart,
+  background_universe = background_entrez,
+  go_bp_spbart = go_bp_spbart,
+  go_mf_spbart = go_mf_spbart,
+  go_cc_spbart = go_cc_spbart,
+  kegg_spbart = kegg_spbart,
+  kegg_spbart_readable = kegg_spbart_readable,
+  mm_enrich_spbart = mm_enrich_spbart,
+  bcell_enrich_spbart = bcell_enrich_spbart,
+  mm_curated_spbart = mm_curated_spbart,
+  mm_pathway_overlap_spbart = spbart_overlap,
+  mm_gene_summary_spbart = spbart_gene_summary,
+  mm_pathway_summary = pathway_summary
+)
+saveRDS(all_results, file.path(output_dir, "spbart_enrichment_analysis_results.RDS"))
+
+message(sprintf("\n=== Results saved to: %s ===", normalizePath(output_dir)))
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
