@@ -158,22 +158,6 @@ SPBART_ACCOUNT=<your_account> SPBART_QOS=<your_qos> bash rerun_studies.sh --fres
 `--fresh` moves the old results to `simulation/results_archive/<timestamp>/`; nothing is deleted. Without it,
 finished replicates are skipped. `bash status_report.sh` summarizes the state of all submitted jobs.
 
-## Model and sampler settings
-
-Settings common to every analysis, unless a study varies them: T = 200 trees; tree prior α = 0.95, β = 2; 100 cutpoints per variable on a
-uniform grid (`usequants = FALSE`); Dirichlet sparsity prior with a = 0.5, b = 1 and ρ = number of tree variables,
-switched on halfway through burn-in; latent error standard deviation fixed at 1; β ~ N(0, 10 I) for spBART; and
-2,000 burn-in iterations followed by 5,000 iterations thinned by 5 (1,000 saved draws).
-
-- **Application** (`fit_spBART_analysis(analysis = "application")` in `R/spBART_sampler.R`): leaf prior standard
-  deviation 0.5·sd(U₀ − Zβ₀)/√T (about 0.5/√T) and no latent offset.
-- **Simulations** (`fit_spBART()` defaults): the `pbart` settings, a leaf prior standard deviation of 3/(k√T) with
-  k = 2 and a fixed offset Φ⁻¹(Ȳ), so that spBART and the BART comparator (`pbart` with the Dirichlet prior) are
-  compared under identical priors.
-
-In the simulation studies, each method draws its random numbers from a stream separate from the one that generates
-the simulated data (`method_seed()` in `simulation/utils/study_functions.R`).
-
 ## Contact
 
 Please open an issue in this repository for questions about the code.

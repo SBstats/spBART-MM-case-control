@@ -79,11 +79,3 @@ They read `data_semisynthetic/semisynthetic_base.RDS`, which is built from the r
 these scenarios can only be run by users who have their own copies of the data (see
 [`../real_data_analysis/README.md`](../real_data_analysis/README.md)). The file is derived from patient-level data
 and is excluded from version control. The other scenarios of Studies 6 and 7, and all other studies, run without it.
-
-## Settings
-
-Unless a study varies them: T = 200 trees, Dirichlet sparsity prior (a = 0.5, b = 1), β ~ N(0, 10 I) for spBART,
-the `pbart` leaf prior and offset for both spBART and BART, 2,000 burn-in iterations followed by 5,000 iterations
-thinned by 5 (1,000 saved draws), and Bayesian FDR control at 0.05. Prediction metrics (AUC and Brier score) are
-computed on an independent test set of n = 1,000 drawn from the same data-generating model; the semi-synthetic
-scenarios use the real validation-set predictors (n = 369) instead.

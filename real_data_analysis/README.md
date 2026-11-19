@@ -54,27 +54,6 @@ spBART is called through `fit_spBART_analysis(analysis = "application")`: no lat
 `fit_spBART()` with its defaults, the `pbart` settings (offset Φ⁻¹(Ȳ), leaf prior s.d. 3/(k√T) with k = 2); see
 `R/spBART_sampler.R`.
 
-## Scripts
-
-| Script | What it does | Needs | Writes |
-|---|---|---|---|
-| `03_real_data_analysis.R` | main spBART analysis (steps 1–6; manuscript Section 4) | `data/` | `results_spBART_<date>/`, `spBART_results/` |
-| `07_multichain_stability.R` | the pipeline of `03` with four chains per spBART fit (own seed and initial latent variables; 10,000 burn-in iterations, then 10,000 saved every tenth), convergence check (rank-normalized split-R̂ ≤ 1.02 and bulk ESS ≥ 390) before pooling, and the fold selections and union of each chain (Section 4.2 and Supplementary Section C) | `data/` | `results_spBART_multichain_<date>/` |
-| `08_BConly_analysis.R` | the pipeline of `03` on the BC case–control participants alone, without the study indicator; every other step is the same (Sections 4.1–4.2 and Supplementary Section D) | `data/` | `results_spBART_BConly_<date>/` |
-| `09_supporting_summaries.R` | DeLong and bootstrap confidence intervals for the validation AUC (pooled, within BC, BC-only), probit coefficients of *IL1RAP* and *ST5* adjusted for age and sex (pooled development set and all BC participants), and their levels among BC cases and controls | latest results of `03` and `08` | `summary/` |
-| `00_prepare_analysis_base.R` | builds the analysis data once (split, normalized genes, covariates, screened genes) for `05` and for the semi-synthetic simulations | `data/` | `analysis_base/analysis_base.RDS`, `../simulation/data_semisynthetic/semisynthetic_base.RDS` |
-| `04_comparative_analysis_ElasticNet_vs_spBART.R` | elastic net with the same screening, compared with spBART's gene selection across FDR levels | `data/` | `results_comparative_analysis_<date>/` |
-| `05_BART_application.R` | BART (`pbart` with the Dirichlet prior) run through the same pipeline, with the covariates in the trees instead of a linear term | output of `00` | `results_BART_application_<date>/` |
-| `06_compare_spBART_BART.R` | average marginal effects of the covariates over the validation participants (spBART by posterior g-computation; age: +10 years, others: 1 vs 0), as reported in Table 6 of the paper, and the gene overlap and marginal effects of spBART versus BART | latest results of `03` and `05` | `summary/` |
-
-Run order: `03`, `04`, `07` and `08` are independent of the others. Run `00` before `05`, `06` after `03` and `05`,
-and `09` after `03` and `08`.
-
-`07` and `08` run `03` with different options (`spBART.n_chains`, `spBART.cohort`), so all three share one
-implementation of the pipeline. `03` and `08` also save the partial dependence of the predicted probability on
-*IL1RAP* and *ST5* in the final refit (`partial_dependence.RDS`, `partial_dependence.pdf`), when these genes are in
-the union.
-
 ## Running the scripts
 
 Install the modified BART package first (from the repository root, `Rscript BART_package/00_install_BART.R`; see the
@@ -107,11 +86,3 @@ SPBART_ACCOUNT=<your_account> SPBART_QOS=<your_qos> bash submit_all.sh real_03_s
 ```
 
 See the main [README](../README.md#running-on-a-slurm-cluster) for the full set of options.
-
-## Keep the outputs private
-
-Every output folder of these scripts (`results_*`, `spBART_results/`, `analysis_base/` and `summary/`) contains
-quantities derived from the patient-level data, for example the normalized 5hmC matrix and predicted probabilities
-for individual participants. The same applies to `../simulation/data_semisynthetic/`. All of these folders are
-excluded from version control. Treat them with the same care as the data themselves, and do not share or commit
-them.
